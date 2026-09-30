@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { LocateFixed, Loader2, MapPin, Navigation, Search } from 'lucide-react'
+import { Car, LocateFixed, Loader2, MapPin, Navigation, Search } from 'lucide-react'
 import {
   Map,
   MapControls,
@@ -18,6 +18,7 @@ import { Input } from '@/components/ui/input'
 import { cn } from '@/lib/utils'
 import { polos, SAO_LUIS_CENTER } from '@/data/polos'
 import { circulo, distanciaMetros, formatarDistancia, obterLocalizacao, type LngLat } from '@/lib/geo'
+import { buscarRotas, formatarDuracao, trajetosPorRua, type Rota, type Trajeto } from '@/lib/rotas'
 
 /** Acima disso (metros) avisamos que a localização está imprecisa */
 const PRECISAO_RUIM = 100
@@ -60,18 +61,32 @@ export default function App() {
   const [precisao, setPrecisao] = useState<number | null>(null)
   const [localizando, setLocalizando] = useState(false)
   const [erroLocalizacao, setErroLocalizacao] = useState<string | null>(null)
+  /** Distância/tempo pelas ruas até cada polo (OSRM); null enquanto não calculado */
+  const [trajetos, setTrajetos] = useState<Record<string, Trajeto | null> | null>(null)
+  const [rotas, setRotas] = useState<Rota[]>([])
+  const [rotaAtiva, setRotaAtiva] = useState(0)
+  const [carregandoRota, setCarregandoRota] = useState(false)
+  const [erroRota, setErroRota] = useState<string | null>(null)
 
-  // Polos com a distância até o usuário (quando a localização é conhecida), ordenados do mais perto ao mais longe
+  // Polos com a distância até o usuário, ordenados do mais perto ao mais longe.
+  // Usa o tempo de carro pelas ruas quando disponível; senão, a distância em linha reta.
   const polosComDistancia = useMemo(() => {
     const lista = polos.map((p) => ({
       ...p,
       distancia: minhaLocalizacao && p.coords ? distanciaMetros(minhaLocalizacao, p.coords) : null,
+      trajeto: trajetos?.[p.id] ?? null,
     }))
     if (!minhaLocalizacao) return lista
-    return lista.sort((a, b) => (a.distancia ?? Infinity) - (b.distancia ?? Infinity))
-  }, [minhaLocalizacao])
+    return lista.sort((a, b) =>
+      trajetos
+        ? (a.trajeto?.duracao ?? Infinity) - (b.trajeto?.duracao ?? Infinity)
+        : (a.distancia ?? Infinity) - (b.distancia ?? Infinity),
+    )
+  }, [minhaLocalizacao, trajetos])
 
-  const maisProximo = minhaLocalizacao ? polosComDistancia.find((p) => p.distancia !== null) ?? null : null
+  const maisProximo = minhaLocalizacao
+    ? (polosComDistancia.find((p) => (trajetos ? p.trajeto : p.distancia !== null)) ?? null)
+    : null
 
   const filtrados = useMemo(() => {
     const termo = normalizar(busca.trim())
@@ -91,6 +106,7 @@ export default function App() {
   function mostrarMaisProximo(local: LngLat) {
     setMinhaLocalizacao(local)
     setErroLocalizacao(null)
+    setTrajetos(null)
     const proximo = polos
       .filter((p) => p.coords)
       .reduce((melhor, p) =>
@@ -99,6 +115,51 @@ export default function App() {
     setSelecionadoId(proximo.id)
     setCamera({ tipo: 'enquadrar', pontos: [local, proximo.coords!] })
   }
+
+  // Com a localização definida, calcula o tempo pelas ruas até todos os polos e seleciona o mais rápido
+  useEffect(() => {
+    if (!minhaLocalizacao || localizando) return
+    const controle = new AbortController()
+    const comLocal = polos.filter((p) => p.coords)
+    trajetosPorRua(minhaLocalizacao, comLocal.map((p) => p.coords!), controle.signal)
+      .then((resultado) => {
+        const porId = Object.fromEntries(comLocal.map((p, i) => [p.id, resultado[i]]))
+        setTrajetos(porId)
+        const maisRapido = comLocal
+          .filter((p) => porId[p.id])
+          .sort((a, b) => porId[a.id]!.duracao - porId[b.id]!.duracao)[0]
+        if (maisRapido) setSelecionadoId(maisRapido.id)
+      })
+      .catch(() => {
+        // Sem OSRM, segue com a distância em linha reta
+      })
+    return () => controle.abort()
+  }, [minhaLocalizacao, localizando])
+
+  // Busca a rota (e alternativas) da sua posição até o polo selecionado
+  useEffect(() => {
+    setRotas([])
+    setRotaAtiva(0)
+    setErroRota(null)
+    const destino = polos.find((p) => p.id === selecionadoId)?.coords
+    if (!minhaLocalizacao || localizando || !destino) return
+    const controle = new AbortController()
+    setCarregandoRota(true)
+    buscarRotas(minhaLocalizacao, destino, controle.signal)
+      .then((resultado) => {
+        setRotas(resultado)
+        if (resultado[0]) {
+          setCamera({ tipo: 'enquadrar', pontos: [minhaLocalizacao, destino, ...resultado[0].coordenadas] })
+        }
+      })
+      .catch((e) => {
+        if (!controle.signal.aborted) setErroRota(e instanceof Error ? e.message : String(e))
+      })
+      .finally(() => {
+        if (!controle.signal.aborted) setCarregandoRota(false)
+      })
+    return () => controle.abort()
+  }, [minhaLocalizacao, localizando, selecionadoId])
 
   async function encontrarMaisProximo() {
     setLocalizando(true)
@@ -169,8 +230,35 @@ export default function App() {
           {maisProximo && (
             <p className="text-muted-foreground text-xs">
               Mais próximo: <span className="text-foreground font-medium">{maisProximo.nome}</span> ·{' '}
-              {formatarDistancia(maisProximo.distancia!)} em linha reta
+              {maisProximo.trajeto
+                ? `${formatarDuracao(maisProximo.trajeto.duracao)} de carro (${formatarDistancia(maisProximo.trajeto.distancia)})`
+                : `${formatarDistancia(maisProximo.distancia!)} em linha reta`}
             </p>
+          )}
+          {selecionado && minhaLocalizacao && (carregandoRota || rotas.length > 0 || erroRota) && (
+            <div className="space-y-1.5 rounded-md border p-2">
+              <p className="flex items-center gap-1.5 text-xs font-medium">
+                <Car className="size-3.5" />
+                Rota até {selecionado.nome}
+                {carregandoRota && <Loader2 className="size-3 animate-spin" />}
+              </p>
+              {erroRota && <p className="text-destructive text-xs">Não foi possível traçar a rota: {erroRota}</p>}
+              <div className="flex flex-wrap gap-1.5">
+                {rotas.map((rota, i) => (
+                  <button
+                    key={i}
+                    type="button"
+                    onClick={() => setRotaAtiva(i)}
+                    className={cn(
+                      'rounded-md border px-2 py-1 text-xs transition-colors',
+                      i === rotaAtiva ? 'border-primary bg-primary text-primary-foreground' : 'hover:bg-muted',
+                    )}
+                  >
+                    {formatarDuracao(rota.duracao)} · {formatarDistancia(rota.distancia)}
+                  </button>
+                ))}
+              </div>
+            </div>
           )}
         </header>
         <ul className="flex-1 overflow-y-auto p-2">
@@ -190,7 +278,9 @@ export default function App() {
                   <span className="block font-medium">{polo.nome}</span>
                   <span className="text-muted-foreground block text-xs">
                     {polo.bairro}
-                    {polo.distancia !== null && ` · ${formatarDistancia(polo.distancia)}`}
+                    {polo.trajeto
+                      ? ` · ${formatarDuracao(polo.trajeto.duracao)} · ${formatarDistancia(polo.trajeto.distancia)}`
+                      : polo.distancia !== null && ` · ${formatarDistancia(polo.distancia)}`}
                   </span>
                 </span>
                 {polo.id === maisProximo?.id ? (
@@ -219,9 +309,26 @@ export default function App() {
           />
           <CameraController camera={camera} />
 
-          {minhaLocalizacao && maisProximo?.coords && (
+          {/* Rotas pelas ruas: alternativas mais claras por baixo, a ativa por cima */}
+          {rotas.map((rota, i) => (
             <MapRoute
-              coordinates={[minhaLocalizacao, maisProximo.coords]}
+              key={`${selecionadoId}-${i}`}
+              coordinates={rota.coordenadas}
+              active={i === rotaAtiva}
+              color="#94a3b8"
+              width={5}
+              opacity={0.7}
+              activeColor="#16a34a"
+              activeWidth={6}
+              activeOpacity={1}
+              onClick={() => setRotaAtiva(i)}
+            />
+          ))}
+
+          {/* Enquanto a rota carrega (ou se o OSRM falhar), mostra a linha reta */}
+          {minhaLocalizacao && selecionado?.coords && rotas.length === 0 && (
+            <MapRoute
+              coordinates={[minhaLocalizacao, selecionado.coords]}
               color="#16a34a"
               width={3}
               dashArray={[2, 2]}
@@ -292,11 +399,18 @@ export default function App() {
               <div className="space-y-1 pr-4">
                 <p className="font-medium">{selecionado.nome}</p>
                 <p className="text-muted-foreground text-xs">{selecionado.bairro} · São Luís - MA</p>
-                {selecionado.distancia !== null && (
+                {rotas[rotaAtiva] ? (
                   <p className="text-xs">
-                    <Navigation className="mr-1 inline size-3" />
-                    {formatarDistancia(selecionado.distancia)} de você (linha reta)
+                    <Car className="mr-1 inline size-3" />
+                    {formatarDuracao(rotas[rotaAtiva].duracao)} de carro · {formatarDistancia(rotas[rotaAtiva].distancia)}
                   </p>
+                ) : (
+                  selecionado.distancia !== null && (
+                    <p className="text-xs">
+                      <Navigation className="mr-1 inline size-3" />
+                      {formatarDistancia(selecionado.distancia)} de você (linha reta)
+                    </p>
+                  )
                 )}
                 {selecionado.aproximado && (
                   <p className="text-xs text-amber-600">Localização aproximada</p>
