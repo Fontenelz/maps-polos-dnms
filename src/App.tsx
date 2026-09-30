@@ -3,6 +3,7 @@ import { LocateFixed, Loader2, MapPin, Navigation, Search } from 'lucide-react'
 import {
   Map,
   MapControls,
+  MapGeoJSON,
   MapMarker,
   MapPopup,
   MapRoute,
@@ -16,7 +17,10 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { cn } from '@/lib/utils'
 import { polos, SAO_LUIS_CENTER } from '@/data/polos'
-import { distanciaMetros, formatarDistancia, obterLocalizacao, type LngLat } from '@/lib/geo'
+import { circulo, distanciaMetros, formatarDistancia, obterLocalizacao, type LngLat } from '@/lib/geo'
+
+/** Acima disso (metros) avisamos que a localização está imprecisa */
+const PRECISAO_RUIM = 100
 
 function normalizar(texto: string) {
   return texto.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase()
@@ -52,6 +56,8 @@ export default function App() {
   const [selecionadoId, setSelecionadoId] = useState<string | null>(null)
   const [camera, setCamera] = useState<Camera | null>(null)
   const [minhaLocalizacao, setMinhaLocalizacao] = useState<LngLat | null>(null)
+  /** Raio de precisão em metros; null quando a posição foi ajustada manualmente */
+  const [precisao, setPrecisao] = useState<number | null>(null)
   const [localizando, setLocalizando] = useState(false)
   const [erroLocalizacao, setErroLocalizacao] = useState<string | null>(null)
 
@@ -96,8 +102,19 @@ export default function App() {
 
   async function encontrarMaisProximo() {
     setLocalizando(true)
+    setErroLocalizacao(null)
+    let primeira = true
     try {
-      mostrarMaisProximo(await obterLocalizacao())
+      const final = await obterLocalizacao({
+        onAtualizacao: ({ coords, precisao }) => {
+          setPrecisao(precisao)
+          // Enquadra o mapa na primeira leitura; as seguintes só refinam o marcador
+          if (primeira) mostrarMaisProximo(coords)
+          else setMinhaLocalizacao(coords)
+          primeira = false
+        },
+      })
+      mostrarMaisProximo(final.coords)
     } catch (e) {
       setErroLocalizacao(e instanceof Error ? e.message : String(e))
     } finally {
@@ -126,9 +143,29 @@ export default function App() {
           </div>
           <Button onClick={encontrarMaisProximo} disabled={localizando} className="w-full">
             {localizando ? <Loader2 className="animate-spin" /> : <LocateFixed />}
-            {minhaLocalizacao ? 'Atualizar minha localização' : 'Encontrar o polo mais próximo'}
+            {localizando
+              ? precisao !== null
+                ? `Refinando… ±${formatarDistancia(precisao)}`
+                : 'Buscando sua localização…'
+              : minhaLocalizacao
+                ? 'Atualizar minha localização'
+                : 'Encontrar o polo mais próximo'}
           </Button>
           {erroLocalizacao && <p className="text-destructive text-xs">{erroLocalizacao}</p>}
+          {minhaLocalizacao && !localizando && (
+            <p className="text-muted-foreground text-xs">
+              {precisao === null
+                ? 'Posição ajustada manualmente.'
+                : `Precisão: ±${formatarDistancia(precisao)}.`}{' '}
+              Arraste o ponto verde no mapa se não for onde você está.
+            </p>
+          )}
+          {precisao !== null && precisao > PRECISAO_RUIM && !localizando && (
+            <p className="rounded-md bg-amber-500/10 p-2 text-xs text-amber-700 dark:text-amber-400">
+              Localização imprecisa. Em computadores a posição vem da rede (Wi-Fi/IP), não de GPS.
+              No celular, ative a localização precisa/GPS e tente de novo.
+            </p>
+          )}
           {maisProximo && (
             <p className="text-muted-foreground text-xs">
               Mais próximo: <span className="text-foreground font-medium">{maisProximo.nome}</span> ·{' '}
@@ -178,9 +215,7 @@ export default function App() {
             position="bottom-right"
             showZoom
             showCompass
-            showLocate
             showFullscreen
-            onLocate={({ longitude, latitude }) => mostrarMaisProximo([longitude, latitude])}
           />
           <CameraController camera={camera} />
 
@@ -194,15 +229,31 @@ export default function App() {
             />
           )}
 
+          {minhaLocalizacao && precisao !== null && (
+            <MapGeoJSON
+              data={circulo(minhaLocalizacao, precisao)}
+              fillPaint={{ 'fill-color': '#16a34a', 'fill-opacity': 0.12 }}
+              linePaint={{ 'line-color': '#16a34a', 'line-width': 1, 'line-opacity': 0.5 }}
+            />
+          )}
+
           {minhaLocalizacao && (
-            <MapMarker longitude={minhaLocalizacao[0]} latitude={minhaLocalizacao[1]}>
+            <MapMarker
+              longitude={minhaLocalizacao[0]}
+              latitude={minhaLocalizacao[1]}
+              draggable
+              onDragEnd={({ lng, lat }) => {
+                setPrecisao(null)
+                mostrarMaisProximo([lng, lat])
+              }}
+            >
               <MarkerContent>
                 <div className="relative flex size-5 items-center justify-center">
                   <span className="absolute inline-flex size-full animate-ping rounded-full bg-green-500 opacity-60" />
                   <span className="relative size-3.5 rounded-full border-2 border-white bg-green-600 shadow-lg" />
                 </div>
               </MarkerContent>
-              <MarkerTooltip>Você está aqui</MarkerTooltip>
+              <MarkerTooltip>Você está aqui · arraste para ajustar</MarkerTooltip>
             </MapMarker>
           )}
 

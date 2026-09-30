@@ -22,7 +22,27 @@ const MENSAGENS_ERRO: Record<number, string> = {
   3: 'Tempo esgotado ao buscar sua localização.',
 }
 
-export function obterLocalizacao(): Promise<LngLat> {
+export type Posicao = { coords: LngLat; /** raio de precisão, em metros */ precisao: number }
+
+type OpcoesLocalizacao = {
+  /** Para assim que a precisão for igual ou melhor que este valor (metros) */
+  precisaoAlvo?: number
+  /** Tempo máximo refinando a posição antes de ficar com a melhor leitura (ms) */
+  tempoMaximo?: number
+  /** Chamado sempre que chega uma leitura mais precisa que a anterior */
+  onAtualizacao?: (posicao: Posicao) => void
+}
+
+/**
+ * Acompanha a posição por alguns segundos e devolve a leitura mais precisa.
+ * A primeira leitura do navegador costuma vir do Wi-Fi/IP (centenas de metros ou mais);
+ * o GPS refina em seguida, por isso não usamos só getCurrentPosition.
+ */
+export function obterLocalizacao({
+  precisaoAlvo = 20,
+  tempoMaximo = 15000,
+  onAtualizacao,
+}: OpcoesLocalizacao = {}): Promise<Posicao> {
   return new Promise((resolve, reject) => {
     if (!('geolocation' in navigator)) {
       reject(new Error('Seu navegador não suporta geolocalização.'))
@@ -32,10 +52,50 @@ export function obterLocalizacao(): Promise<LngLat> {
       reject(new Error('A localização só funciona em HTTPS ou em localhost.'))
       return
     }
-    navigator.geolocation.getCurrentPosition(
-      (pos) => resolve([pos.coords.longitude, pos.coords.latitude]),
-      (err) => reject(new Error(MENSAGENS_ERRO[err.code] ?? err.message)),
-      { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 },
+
+    let melhor: Posicao | null = null
+    let finalizado = false
+
+    const finalizar = (erro?: Error) => {
+      if (finalizado) return
+      finalizado = true
+      navigator.geolocation.clearWatch(watchId)
+      clearTimeout(timer)
+      if (melhor) resolve(melhor)
+      else reject(erro ?? new Error(MENSAGENS_ERRO[3]))
+    }
+
+    const watchId = navigator.geolocation.watchPosition(
+      (pos) => {
+        const atual: Posicao = {
+          coords: [pos.coords.longitude, pos.coords.latitude],
+          precisao: pos.coords.accuracy,
+        }
+        if (!melhor || atual.precisao < melhor.precisao) {
+          melhor = atual
+          onAtualizacao?.(atual)
+        }
+        if (atual.precisao <= precisaoAlvo) finalizar()
+      },
+      (err) => {
+        // Permissão negada encerra na hora; outros erros só encerram se ainda não houver leitura
+        if (err.code === 1 || !melhor) finalizar(new Error(MENSAGENS_ERRO[err.code] ?? err.message))
+      },
+      { enableHighAccuracy: true, maximumAge: 0, timeout: tempoMaximo },
     )
+
+    const timer = setTimeout(() => finalizar(), tempoMaximo)
   })
+}
+
+/** Polígono aproximando um círculo de `raio` metros em volta de `centro` */
+export function circulo([lng, lat]: LngLat, raio: number, pontos = 64): GeoJSON.Feature<GeoJSON.Polygon> {
+  const dLat = raio / 111320
+  const dLng = raio / (111320 * Math.cos((lat * Math.PI) / 180))
+  const anel: LngLat[] = []
+  for (let i = 0; i <= pontos; i++) {
+    const t = (i / pontos) * 2 * Math.PI
+    anel.push([lng + dLng * Math.cos(t), lat + dLat * Math.sin(t)])
+  }
+  return { type: 'Feature', properties: {}, geometry: { type: 'Polygon', coordinates: [anel] } }
 }
