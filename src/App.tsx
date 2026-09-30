@@ -1,46 +1,109 @@
 import { useEffect, useMemo, useState } from 'react'
-import { MapPin, Search } from 'lucide-react'
+import { LocateFixed, Loader2, MapPin, Navigation, Search } from 'lucide-react'
 import {
   Map,
   MapControls,
   MapMarker,
   MapPopup,
+  MapRoute,
   MarkerContent,
   MarkerLabel,
   MarkerTooltip,
   useMap,
 } from '@/components/ui/map'
 import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { cn } from '@/lib/utils'
-import { polos, SAO_LUIS_CENTER, type Polo } from '@/data/polos'
+import { polos, SAO_LUIS_CENTER } from '@/data/polos'
+import { distanciaMetros, formatarDistancia, obterLocalizacao, type LngLat } from '@/lib/geo'
 
 function normalizar(texto: string) {
   return texto.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase()
 }
 
-function FlyTo({ polo }: { polo: Polo | null }) {
+type Camera =
+  | { tipo: 'ponto'; centro: LngLat }
+  | { tipo: 'enquadrar'; pontos: LngLat[] }
+
+function CameraController({ camera }: { camera: Camera | null }) {
   const { map, isLoaded } = useMap()
   useEffect(() => {
-    if (map && isLoaded && polo?.coords) {
-      map.flyTo({ center: polo.coords, zoom: 15, duration: 1200 })
+    if (!map || !isLoaded || !camera) return
+    if (camera.tipo === 'ponto') {
+      map.flyTo({ center: camera.centro, zoom: 15, duration: 1200 })
+    } else {
+      const lngs = camera.pontos.map((p) => p[0])
+      const lats = camera.pontos.map((p) => p[1])
+      map.fitBounds(
+        [
+          [Math.min(...lngs), Math.min(...lats)],
+          [Math.max(...lngs), Math.max(...lats)],
+        ],
+        { padding: 80, maxZoom: 15, duration: 1200 },
+      )
     }
-  }, [map, isLoaded, polo])
+  }, [map, isLoaded, camera])
   return null
 }
 
 export default function App() {
   const [busca, setBusca] = useState('')
   const [selecionadoId, setSelecionadoId] = useState<string | null>(null)
+  const [camera, setCamera] = useState<Camera | null>(null)
+  const [minhaLocalizacao, setMinhaLocalizacao] = useState<LngLat | null>(null)
+  const [localizando, setLocalizando] = useState(false)
+  const [erroLocalizacao, setErroLocalizacao] = useState<string | null>(null)
+
+  // Polos com a distância até o usuário (quando a localização é conhecida), ordenados do mais perto ao mais longe
+  const polosComDistancia = useMemo(() => {
+    const lista = polos.map((p) => ({
+      ...p,
+      distancia: minhaLocalizacao && p.coords ? distanciaMetros(minhaLocalizacao, p.coords) : null,
+    }))
+    if (!minhaLocalizacao) return lista
+    return lista.sort((a, b) => (a.distancia ?? Infinity) - (b.distancia ?? Infinity))
+  }, [minhaLocalizacao])
+
+  const maisProximo = minhaLocalizacao ? polosComDistancia.find((p) => p.distancia !== null) ?? null : null
 
   const filtrados = useMemo(() => {
     const termo = normalizar(busca.trim())
-    if (!termo) return polos
-    return polos.filter((p) => normalizar(`${p.nome} ${p.bairro}`).includes(termo))
-  }, [busca])
+    if (!termo) return polosComDistancia
+    return polosComDistancia.filter((p) => normalizar(`${p.nome} ${p.bairro}`).includes(termo))
+  }, [busca, polosComDistancia])
 
-  const selecionado = polos.find((p) => p.id === selecionadoId) ?? null
+  const selecionado = polosComDistancia.find((p) => p.id === selecionadoId) ?? null
   const noMapa = filtrados.filter((p) => p.coords)
+
+  function selecionar(id: string) {
+    const polo = polos.find((p) => p.id === id)
+    setSelecionadoId(id)
+    if (polo?.coords) setCamera({ tipo: 'ponto', centro: polo.coords })
+  }
+
+  function mostrarMaisProximo(local: LngLat) {
+    setMinhaLocalizacao(local)
+    setErroLocalizacao(null)
+    const proximo = polos
+      .filter((p) => p.coords)
+      .reduce((melhor, p) =>
+        distanciaMetros(local, p.coords!) < distanciaMetros(local, melhor.coords!) ? p : melhor,
+      )
+    setSelecionadoId(proximo.id)
+    setCamera({ tipo: 'enquadrar', pontos: [local, proximo.coords!] })
+  }
+
+  async function encontrarMaisProximo() {
+    setLocalizando(true)
+    try {
+      mostrarMaisProximo(await obterLocalizacao())
+    } catch (e) {
+      setErroLocalizacao(e instanceof Error ? e.message : String(e))
+    } finally {
+      setLocalizando(false)
+    }
+  }
 
   return (
     <div className="bg-background text-foreground flex h-dvh flex-col md:flex-row">
@@ -61,6 +124,17 @@ export default function App() {
               className="pl-8"
             />
           </div>
+          <Button onClick={encontrarMaisProximo} disabled={localizando} className="w-full">
+            {localizando ? <Loader2 className="animate-spin" /> : <LocateFixed />}
+            {minhaLocalizacao ? 'Atualizar minha localização' : 'Encontrar o polo mais próximo'}
+          </Button>
+          {erroLocalizacao && <p className="text-destructive text-xs">{erroLocalizacao}</p>}
+          {maisProximo && (
+            <p className="text-muted-foreground text-xs">
+              Mais próximo: <span className="text-foreground font-medium">{maisProximo.nome}</span> ·{' '}
+              {formatarDistancia(maisProximo.distancia!)} em linha reta
+            </p>
+          )}
         </header>
         <ul className="flex-1 overflow-y-auto p-2">
           {filtrados.map((polo) => (
@@ -68,7 +142,7 @@ export default function App() {
               <button
                 type="button"
                 disabled={!polo.coords}
-                onClick={() => setSelecionadoId(polo.id)}
+                onClick={() => selecionar(polo.id)}
                 className={cn(
                   'hover:bg-muted flex w-full items-start gap-2 rounded-md p-2 text-left text-sm transition-colors disabled:cursor-not-allowed disabled:opacity-60',
                   selecionadoId === polo.id && 'bg-muted',
@@ -77,9 +151,14 @@ export default function App() {
                 <MapPin className="text-primary mt-0.5 size-4 shrink-0" />
                 <span className="flex-1">
                   <span className="block font-medium">{polo.nome}</span>
-                  <span className="text-muted-foreground block text-xs">{polo.bairro}</span>
+                  <span className="text-muted-foreground block text-xs">
+                    {polo.bairro}
+                    {polo.distancia !== null && ` · ${formatarDistancia(polo.distancia)}`}
+                  </span>
                 </span>
-                {!polo.coords ? (
+                {polo.id === maisProximo?.id ? (
+                  <Badge>mais próximo</Badge>
+                ) : !polo.coords ? (
                   <Badge variant="outline">sem local</Badge>
                 ) : polo.aproximado ? (
                   <Badge variant="secondary">aprox.</Badge>
@@ -95,15 +174,44 @@ export default function App() {
 
       <main className="relative flex-1">
         <Map center={SAO_LUIS_CENTER} zoom={12.3}>
-          <MapControls position="bottom-right" showZoom showCompass showLocate showFullscreen />
-          <FlyTo polo={selecionado} />
+          <MapControls
+            position="bottom-right"
+            showZoom
+            showCompass
+            showLocate
+            showFullscreen
+            onLocate={({ longitude, latitude }) => mostrarMaisProximo([longitude, latitude])}
+          />
+          <CameraController camera={camera} />
+
+          {minhaLocalizacao && maisProximo?.coords && (
+            <MapRoute
+              coordinates={[minhaLocalizacao, maisProximo.coords]}
+              color="#16a34a"
+              width={3}
+              dashArray={[2, 2]}
+              interactive={false}
+            />
+          )}
+
+          {minhaLocalizacao && (
+            <MapMarker longitude={minhaLocalizacao[0]} latitude={minhaLocalizacao[1]}>
+              <MarkerContent>
+                <div className="relative flex size-5 items-center justify-center">
+                  <span className="absolute inline-flex size-full animate-ping rounded-full bg-green-500 opacity-60" />
+                  <span className="relative size-3.5 rounded-full border-2 border-white bg-green-600 shadow-lg" />
+                </div>
+              </MarkerContent>
+              <MarkerTooltip>Você está aqui</MarkerTooltip>
+            </MapMarker>
+          )}
 
           {noMapa.map((polo) => (
             <MapMarker
               key={polo.id}
               longitude={polo.coords![0]}
               latitude={polo.coords![1]}
-              onClick={() => setSelecionadoId(polo.id)}
+              onClick={() => selecionar(polo.id)}
             >
               <MarkerContent>
                 <div
@@ -133,6 +241,12 @@ export default function App() {
               <div className="space-y-1 pr-4">
                 <p className="font-medium">{selecionado.nome}</p>
                 <p className="text-muted-foreground text-xs">{selecionado.bairro} · São Luís - MA</p>
+                {selecionado.distancia !== null && (
+                  <p className="text-xs">
+                    <Navigation className="mr-1 inline size-3" />
+                    {formatarDistancia(selecionado.distancia)} de você (linha reta)
+                  </p>
+                )}
                 {selecionado.aproximado && (
                   <p className="text-xs text-amber-600">Localização aproximada</p>
                 )}
@@ -152,6 +266,9 @@ export default function App() {
         <div className="bg-background/90 absolute top-2 left-2 flex gap-3 rounded-md border px-3 py-1.5 text-xs shadow-sm backdrop-blur">
           <span className="flex items-center gap-1.5"><span className="size-2.5 rounded-full bg-blue-600" />Localização exata</span>
           <span className="flex items-center gap-1.5"><span className="size-2.5 rounded-full bg-amber-500" />Aproximada</span>
+          {minhaLocalizacao && (
+            <span className="flex items-center gap-1.5"><span className="size-2.5 rounded-full bg-green-600" />Você</span>
+          )}
         </div>
       </main>
     </div>
