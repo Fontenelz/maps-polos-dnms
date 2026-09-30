@@ -16,7 +16,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { cn } from '@/lib/utils'
-import { polos, SAO_LUIS_CENTER } from '@/data/polos'
+import { buscarPolos, SAO_LUIS_CENTER, type Polo } from '@/lib/polos'
 import { circulo, distanciaMetros, formatarDistancia, obterLocalizacao, type LngLat } from '@/lib/geo'
 import { buscarRotas, formatarDuracao, trajetosPorRua, type Rota, type Trajeto } from '@/lib/rotas'
 
@@ -53,6 +53,9 @@ function CameraController({ camera }: { camera: Camera | null }) {
 }
 
 export default function App() {
+  const [polos, setPolos] = useState<Polo[]>([])
+  const [carregandoPolos, setCarregandoPolos] = useState(true)
+  const [erroPolos, setErroPolos] = useState<string | null>(null)
   const [busca, setBusca] = useState('')
   const [selecionadoId, setSelecionadoId] = useState<string | null>(null)
   const [camera, setCamera] = useState<Camera | null>(null)
@@ -82,7 +85,7 @@ export default function App() {
         ? (a.trajeto?.duracao ?? Infinity) - (b.trajeto?.duracao ?? Infinity)
         : (a.distancia ?? Infinity) - (b.distancia ?? Infinity),
     )
-  }, [minhaLocalizacao, trajetos])
+  }, [polos, minhaLocalizacao, trajetos])
 
   const maisProximo = minhaLocalizacao
     ? (polosComDistancia.find((p) => (trajetos ? p.trajeto : p.distancia !== null)) ?? null)
@@ -116,6 +119,19 @@ export default function App() {
     setCamera({ tipo: 'enquadrar', pontos: [local, proximo.coords!] })
   }
 
+  useEffect(() => {
+    const controle = new AbortController()
+    buscarPolos(controle.signal)
+      .then(setPolos)
+      .catch((e) => {
+        if (!controle.signal.aborted) setErroPolos(e instanceof Error ? e.message : String(e))
+      })
+      .finally(() => {
+        if (!controle.signal.aborted) setCarregandoPolos(false)
+      })
+    return () => controle.abort()
+  }, [])
+
   // Com a localização definida, calcula o tempo pelas ruas até todos os polos e seleciona o mais rápido
   useEffect(() => {
     if (!minhaLocalizacao || localizando) return
@@ -134,7 +150,7 @@ export default function App() {
         // Sem OSRM, segue com a distância em linha reta
       })
     return () => controle.abort()
-  }, [minhaLocalizacao, localizando])
+  }, [polos, minhaLocalizacao, localizando])
 
   // Busca a rota (e alternativas) da sua posição até o polo selecionado
   useEffect(() => {
@@ -159,7 +175,7 @@ export default function App() {
         if (!controle.signal.aborted) setCarregandoRota(false)
       })
     return () => controle.abort()
-  }, [minhaLocalizacao, localizando, selecionadoId])
+  }, [polos, minhaLocalizacao, localizando, selecionadoId])
 
   async function encontrarMaisProximo() {
     setLocalizando(true)
@@ -190,8 +206,11 @@ export default function App() {
           <div>
             <h1 className="text-lg font-semibold">Polos · São Luís</h1>
             <p className="text-muted-foreground text-sm">
-              {polos.length} polos · {polos.filter((p) => p.coords).length} no mapa
+              {carregandoPolos
+                ? 'Carregando polos…'
+                : `${polos.length} polos · ${polos.filter((p) => p.coords).length} no mapa`}
             </p>
+            {erroPolos && <p className="text-destructive text-xs">{erroPolos}</p>}
           </div>
           <div className="relative">
             <Search className="text-muted-foreground absolute top-1/2 left-2.5 size-4 -translate-y-1/2" />
@@ -293,7 +312,7 @@ export default function App() {
               </button>
             </li>
           ))}
-          {filtrados.length === 0 && (
+          {filtrados.length === 0 && !carregandoPolos && (
             <li className="text-muted-foreground p-4 text-center text-sm">Nenhum polo encontrado.</li>
           )}
         </ul>

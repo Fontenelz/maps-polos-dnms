@@ -1,15 +1,12 @@
-export type Polo = {
+// Polos iniciais, gravados no banco por scripts/migrar.ts (só na primeira vez — não sobrescreve edições).
+// Coordenadas obtidas no OpenStreetMap (Nominatim).
+export const polosIniciais: {
   id: string
   nome: string
   bairro: string
-  /** [longitude, latitude] — null quando a localização ainda não foi definida */
   coords: [number, number] | null
-  /** true quando a coordenada é aproximada (centro do bairro/condomínio) */
   aproximado?: boolean
-}
-
-// Coordenadas obtidas no OpenStreetMap (Nominatim). Ajuste conforme o endereço exato de cada polo.
-export const polos: Polo[] = [
+}[] = [
   { id: 'alto-do-calhau', nome: 'Alto do Calhau', bairro: 'Altos do Calhau', coords: [-44.2557, -2.5004] },
   { id: 'angelim', nome: 'Angelim', bairro: 'Angelim', coords: [-44.2353, -2.5304] },
   { id: 'aracagy-1', nome: 'Araçagy 1 (Damha)', bairro: 'Araçagi', coords: [-44.2060, -2.4790], aproximado: true },
@@ -30,5 +27,3 @@ export const polos: Polo[] = [
   { id: 'turu', nome: 'Turu (General Arthur Carvalho)', bairro: 'Turu', coords: [-44.2215, -2.5157] },
 ]
 
-/** Centro da região dos polos em São Luís - MA */
-export const SAO_LUIS_CENTER: [number, number] = [-44.245, -2.502]
